@@ -1,0 +1,17 @@
+# each of those can be overriden on env or host level
+databases: [ '%' ]
+roles_to_kill: [ '%' ]
+max_idle_time: 15min
+
+envs:
+    -
+        name: idler_camp
+        max_idle_time: 20min
+        hosts:
+            somedb:
+               host: z-somedb.com
+               port: 5432
+#               roles_to_kill: [ 'app1' ]
+#               databases: [ 'integration_test_db' ]
+#               max_idle_time: 15s
+
