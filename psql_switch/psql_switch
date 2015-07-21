@@ -1,0 +1,152 @@
+#!/usr/bin/env python
+import argparse
+
+import os
+import re
+import subprocess
+import sys
+import ConfigParser
+import itertools
+
+SERVICE_FILE_LOCATION = os.path.expanduser('~/.pg_service.conf')
+PSQL_CMD = "psql"
+
+
+def get_service_file_as_config(ini_file_path):
+    config = ConfigParser.ConfigParser()
+    config.readfp(open(ini_file_path))
+    return config
+
+
+def get_db_from_config(config, dbname):
+    if not config.has_section(dbname):
+        raise Exception('Database not defined in service file at {}'.format(SERVICE_FILE_LOCATION))
+    return dict(config.items(dbname))
+
+def get_all_shards_from_config(config, base_dbname):     # db for db1, db2,...
+    for db in config.sections():
+        if db.startswith(base_dbname):
+            yield db
+
+def pass_to_psql(service, sql=None, params=[]):
+    if sql:
+        subprocess.call([PSQL_CMD, "service=" + service, '-c' + sql] + params)
+    else:
+        subprocess.call([PSQL_CMD, "service=" + service] + params)
+
+def generate_links_into_current_folder(servers):
+    links_to_generate = []
+    for server in servers:
+        links_to_generate.append("psql_{}".format(server))
+
+    for key, members in itertools.groupby(servers, lambda x: re.sub('[0-9]', '', x)):
+        if len(list(members)) > 1:
+            links_to_generate.append("psql_{}ALL".format(key))
+
+    links_to_generate.sort()
+    for link_name in links_to_generate:
+        print 'generating a link for "{}"'.format(link_name)
+        subprocess.call(['ln', '-sf', sys.argv[0], link_name])
+
+def shell_exec_with_output(commands):
+    process = subprocess.Popen(commands, stdout=subprocess.PIPE)
+    exitcode = process.wait()
+    if exitcode != 0:
+        print 'error executing: ', commands
+    return process.stdout.read().strip()
+
+def main():
+    argp = argparse.ArgumentParser(description='A light wrapper around "psql" command line tool. Works together with the connection service file. \
+         [http://www.postgresql.org/docs/current/static/libpq-pgservice.html]')
+    argp.add_argument('--list', dest='list', help='list all DBs from ~/.pg_service.conf', action='store_true')
+    argp.add_argument('--generate-links', help='creates symbolic links for all DBs found in service file in current directory', action='store_true')
+    argp.add_argument('--nostop', help='ignore failures', action='store_true')
+    argp.add_argument('--cs', '--conn-string', dest='conn_string', help='print connection string to stdout', action='store_true')
+    argp.add_argument('--i', '--info', dest='info', help='show key information about the cluster - postgres version + ip/port + uptime', action='store_true')
+    argp.add_argument('--s', '--schema', dest='schema', help='list all distinct user schemas with latest APIs', action='store_true')
+    argp.add_argument('--ssh', help='tries to log onto the machine as user "postgres" (user needs to have his key on the machine)', action='store_true')
+    argp.add_argument('--l', '--log', dest='log', help='follow the tail of the logfile. expects pg_taillog to be present', action='store_true')
+    argp.add_argument('--w', '--watch', dest='watch', help='watch active connections (with pg_view)', action='store_true')
+    argp.add_argument('--a', '--active', dest='active', help='show active queries (pg_stat_activity.state != idle)', action='store_true')
+    argp.add_argument('--c', '--conns', dest='conns', help='show top consumers of connection', action='store_true')
+    argp.add_argument('--kill', help='pid1 pid2 ...pidN', type=int, nargs='+')
+    argp.add_argument('--killuser', help='terminate all of given users queries')
+    argp.add_argument('--idle', help='shows sessions idle in tx', action='store_true')
+    argp.add_argument('--locks', help='shows locked/locking queries for the current db', action='store_true')
+
+    args, unknown_args = argp.parse_known_args()
+
+    basename = os.path.basename(sys.argv[0])
+    if basename == 'psql_switch' and not (args.generate_links or args.list):
+        print 'For direct execution only --generate-links and --list actions are supported.\nFile should be normally executed via symlinked ' \
+              'versions containing service names e.g. "psql_mydb ..."' \
+              '\nUse --generate-links to create symlinks to all defined servers in the service file into current folder (you would want to add the folder to $PATH also)' \
+              '\nUse --list to list all available DBs in the ~/.service.conf file'
+        exit()
+
+    service_config = get_service_file_as_config(SERVICE_FILE_LOCATION)
+
+    if args.list:
+        print service_config.sections()
+        exit(0)
+    elif args.generate_links:
+        generate_links_into_current_folder(service_config.sections())
+        exit(0)
+
+    dbname = basename[len('psql_'):]
+    service_names = [dbname]
+    if dbname[-3:] == 'ALL':
+        dbname = dbname[:-3]
+        service_names = get_all_shards_from_config(service_config, dbname)
+
+    nostop = ''
+    if args.nostop:
+        nostop = 'STOP_ON_ERROR=0'
+
+    for service_name in service_names:
+        if not ('-q' in sys.argv or '--quiet' in sys.argv):
+            print >> sys.stderr, 'running on service:', service_name
+        if args.conn_string:
+            params = get_db_from_config(service_config, service_name)
+            print "psql -h %(host)s -p %(port)s -d %(dbname)s" % params + (" -U " + params['user'] if 'user' in params else '')
+        elif args.info:
+            sql = "select current_database(), setting as version, pg_is_in_recovery(), inet_server_addr(), inet_server_port(), pg_postmaster_start_time(), pg_conf_load_time(), current_setting('data_directory') as data_directory from pg_settings where name = 'server_version'"
+            pass_to_psql(service_name, sql)
+        elif args.schema:
+            sql = "select max(schema_name) as schema_name, max(schema_owner) as schema_owner from information_schema.schemata where not schema_name like any (array [E'pg\\_%', 'information_schema', 'public']) group by regexp_replace(schema_name, E'\\_r[_0-9]+', '', 'i') order by 1"
+            pass_to_psql(service_name, sql)
+        elif args.ssh:
+            params = get_db_from_config(service_config, service_name)
+            subprocess.call(['ssh', 'postgres@{}'.format(params['host'])] + sys.argv[2:])
+        elif args.log:      # expects pg_taillog to be there TODO needs to be published!
+            params = get_db_from_config(service_config, service_name)
+            sql_data_dir = "SELECT current_setting('data_directory')"
+            data_dir = shell_exec_with_output([PSQL_CMD, 'service='+service_name, '-XAtc', sql_data_dir])
+            subprocess.call(['ssh', '-t', 'postgres@{}'.format(params['host']), 'bash -i /data/postgres/bin/pg_taillog -D {}'.format(data_dir)])
+        elif args.watch:
+            watch_cmd = 'bash -ic pg_view'  # expects https://github.com/zalando/pg_view to be installed and on path
+            params = get_db_from_config(service_config, service_name)
+            subprocess.call(['ssh', '-t', 'postgres@{}'.format(params['host']), watch_cmd])
+        elif args.active:
+            sql = "select datname, usename, state, waiting, pid, query, (now() - query_start) as age from pg_stat_activity where state != 'idle' and pid != pg_backend_pid() order by 7 desc"
+            pass_to_psql(service_name, sql)
+        elif args.conns:
+            sql = """with q_sa as (select usename, datname, count(1) from pg_stat_activity where pid != pg_backend_pid() group by 1, 2) select *, (select sum(count) from q_sa) as total, current_setting('max_connections') as "max" from q_sa order by count desc limit 10"""
+            pass_to_psql(service_name, sql)
+        elif args.kill:
+            for pid_to_kill in args.kill:
+                pass_to_psql(service_name, "select pg_terminate_backend({})".format(pid_to_kill))
+        elif args.killuser:
+            sql = "select pg_terminate_backend(pid) from pg_stat_activity where usename = '{}' and pid != pg_backend_pid()".format(args.killuser)
+            pass_to_psql(service_name, sql)
+        elif args.idle:
+            sql = "select datname, pid, usename, application_name, client_addr, xact_start, query_start, query from pg_stat_activity where state = 'idle in transaction' order by query_start"
+            pass_to_psql(service_name, sql)
+        elif args.locks:
+            sql = "select c.relname, sa1.query as locked_query, sa2.pid as locking_pid, sa2.usename as locking_user, sa2.query as locking_query, now() - sa2.query_start as duration from pg_stat_activity sa1, pg_locks l1, pg_locks l2, pg_class c, pg_stat_activity sa2 where sa1.waiting and l1.pid = sa1.pid and not l1.granted and l2.relation = l1.relation and l2.granted and c.oid = l2.relation and sa2.pid = l2.pid order by 6 desc"
+            pass_to_psql(service_name, sql)
+        else:
+            pass_to_psql(service_name, params=sys.argv[1:] + [nostop])
+
+if __name__ == '__main__':
+    main()
