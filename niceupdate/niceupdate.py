@@ -193,7 +193,7 @@ def load_config(args):
     document['vacuum_delay'] = args.vacuum_delay or document.get('vacuum_delay') or 0
     document['environment'] = args.environment or document.get('environment', None)
     if not document['environment']:
-        sys.stderr.write('Database environment missing, possible values are LIVE, patch, release or integration\n')
+        sys.stderr.write('Database environment missing.\n')
         sys.exit(1)
     if bool(document.get('commitrows')) == bool(document.get('chunksize')) or document.get('commitrows', 0) \
         + document.get('chunksize', 0) < 1:
