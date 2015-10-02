@@ -21,33 +21,35 @@ POSTGRES_DATE_FORMAT = '%Y-%m-%d %H:%M:%S.%f %Z'
 argp = \
     argparse.ArgumentParser(description='Scans PostgreSQL logs and displays log lines or statistics according to given filters. \
      Assumes default "csvlog" logging format and by default being in the pg_log folder or specifying a folder e.g. with --globpath=/var/lib/postgresql/*/main/pg_log', add_help=True)
+# Input
 group1 = argp.add_mutually_exclusive_group()
-group1.add_argument('-p', '--people', dest='people', action='store_true', default=False, help='Show only entries from human users')    # by default show both
-group1.add_argument('-r', '--robots', dest='robots', action='store_true', default=False, help='Show only entries from robots (zomcat*, robot*)')
-group1.add_argument('-u', '--user', dest='user', help='Show only entries matching given substring')
-group2 = argp.add_mutually_exclusive_group()
-group2.add_argument('-s', '--stdin', action='store_true', default=False, help='Read input from stdin')
-group2.add_argument('-f', '--file', default=None, help='File to grep. Can be Gzip')
-group2.add_argument('-g', '--globpath', dest='globpath', default=DEFAULT_GLOB_PATH,
-                  help='Glob pattern for logfiles [default.: {}]'.format(DEFAULT_GLOB_PATH))
-group3 = argp.add_mutually_exclusive_group()
-group3.add_argument('-m', '--minutes', dest='minutes', help='Show only entries younger than given minutes')
-group3.add_argument('-y', '--days', dest='days', type=int, help='Show entries for given days. Gzipped files included')
-group4 = argp.add_mutually_exclusive_group()
-group4.add_argument('-e', '--errors', dest='errors', action='store_true', default=False, help='Show only entries >= ERROR. Keyword is ignored')
-group4.add_argument('--severity', dest='severity', help='Show only messages of certain severity level')
-group4.add_argument('-c', '--conns', dest='conns', action='store_true', default=False, help='Show connection counts per db/user')
+group1.add_argument('-s', '--stdin', action='store_true', default=False, help='Read input from stdin')
+group1.add_argument('-f', '--file', default=None, help='File to grep. Can be Gzip')
+group1.add_argument('-g', '--globpath', default=DEFAULT_GLOB_PATH, help='Glob pattern for logfiles [default.: {}]'.format(DEFAULT_GLOB_PATH))
+# Filters
+argp.add_argument('keyword', metavar='KEYWORD', type=str, nargs='?', help='Text to grep for')
+argp.add_argument('-q', '--queries', action='store_true', default=False, help='Show only SQL statements')
+argp.add_argument('-d', '--dbname', help='Show only entries from DBs matching given substring')     # TODO regex
+argp.add_argument('-n', '--no-noise', action='store_true', default=False, help='Try to remove PgAdmin3 noise')
+argp.add_argument('-p', '--people', action='store_true', default=False, help='Show only entries from human users')    # by default show both
+argp.add_argument('-r', '--robots', action='store_true', default=False, help='Show only entries from robots (zomcat*, robot*)')    # TODO regex
+argp.add_argument('-u', '--user', help='Show only entries matching given substring')     # TODO incl/excl usersm, regex
+group_time_filters = argp.add_mutually_exclusive_group()
+group_time_filters.add_argument('-m', '--minutes', help='Show only entries younger than given minutes')
+group_time_filters.add_argument('-y', '--days', type=int, help='Show entries for given days. Gzipped files included')
+group_severity = argp.add_mutually_exclusive_group()
+group_severity.add_argument('-e', '--errors', action='store_true', default=False, help='Show only entries >= ERROR. Keyword is ignored')
+group_severity.add_argument('--severity', help='Show only messages of certain severity level')
+# Output
 group5 = argp.add_mutually_exclusive_group()
-group5.add_argument('-l', '--single-line', dest='single_line', action='store_true', help='Join multiline messages to one line')
-group5.add_argument('-o', '--short', dest='short', action='store_true', default=False, help='Show only time, db, user, severity, message, query and trunc latter to 80char')
-argp.add_argument('-d', '--dbname', dest='dbname', help='Show only entries from DBs matching given substring')
-argp.add_argument('--stats', dest='stats', action='store_true', default=False, help='For showing counts per db/severity')
-argp.add_argument('-q', '--queries', dest='queries', action='store_true', default=False, help='Show only SQL statements')
-argp.add_argument('-n', '--no-noise', dest='no_noise', action='store_true', default=False, help='Try to remove PgAdmin3 noise')
-argp.add_argument('--graph', dest='graph', action='store_true', default=False, help='Show a basic graph of event distribution over time. Useful with --errors filter for example')
+group5.add_argument('-l', '--single-line', action='store_true', help='Join multiline messages to one line')
+group5.add_argument('-o', '--short', action='store_true', default=False, help='Show only time, db, user, severity, message, query and trunc latter to 80char')
+group_summaries = argp.add_mutually_exclusive_group()
+group_summaries.add_argument('-c', '--conns', action='store_true', default=False, help='Show connection statistics per db/user')
+group_summaries.add_argument('--stats', action='store_true', default=False, help='Showing counts per db/severity')
+group_summaries.add_argument('--graph', action='store_true', default=False, help='Show a basic graph of event distribution over time. Useful with -e/--errors filter')
 # argp.add_argument('--bucket', dest='bucket', default=60, type=int, help='Bucket for aggregations (--graph)')  # TODO non-hourly buckets
 argp.add_argument('-v', '--verbose', dest='verbose', action='store_true', default=False, help='For debugging')
-argp.add_argument('keyword', metavar='KEYWORD', type=str, nargs='?', help='Text to grep')
 
 
 args = argp.parse_args()
