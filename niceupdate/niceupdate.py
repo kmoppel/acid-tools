@@ -610,7 +610,7 @@ class KindlyUpdate(object):
         self.show_message('decreased threshold: {0}'.format(self.max_load_average))
 
     def perform_vacuum(self):
-        v = self.build_query('vacuum {0}'.format(self.config.get('vacuum_table')))
+        v = self.build_query('vacuum analyze {0}'.format(self.config.get('vacuum_table')))
         self.conn.autocommit = True
         c = self.conn.cursor()
         c.execute(SQL_GET_TIMEOUT)
