@@ -20,55 +20,47 @@ PG_LOG_NAMING = '/postgresql-{curdate}*.csv*'
 DEFAULT_GLOB = (DEFAULT_GLOB_PATH + PG_LOG_NAMING).format(curdate=datetime.now().strftime('%Y-%m-%d'))
 POSTGRES_DATE_FORMAT = '%Y-%m-%d %H:%M:%S.%f %Z'
 
-argp = \
-    argparse.ArgumentParser(description='Scans PostgreSQL logs and displays log lines or statistics according to given filters. \
-     Assumes default "csvlog" logging format and by default being in the pg_log folder or specifying a folder e.g. with --globpath=/var/lib/postgresql/*/main/pg_log', add_help=True)
-group_summaries = argp.add_mutually_exclusive_group()
-# Input
-group1 = argp.add_mutually_exclusive_group()
-group1.add_argument('-s', '--stdin', action='store_true', default=False, help='Read input from stdin')
-group1.add_argument('-f', '--file', default=None, help='File to grep. Can be Gzip')
-group1.add_argument('-g', '--globpath', default=DEFAULT_GLOB_PATH, help='Glob pattern for logfiles [default.: {}]'.format(DEFAULT_GLOB_PATH))
-group_summaries.add_argument('-t', '--tail', action='store_true', default=False, help='Keep running and checking for new input/files')
-# Filters
-argp.add_argument('keyword', metavar='KEYWORD', type=str, nargs='?', help='Text to grep for')
-argp.add_argument('-q', '--queries', action='store_true', default=False, help='Show only SQL statements')
-argp.add_argument('-d', '--dbname', help='Show only entries from DBs matching given substring')     # TODO regex
-argp.add_argument('-n', '--no-noise', action='store_true', default=False, help='Try to remove PgAdmin3 noise')
-argp.add_argument('-p', '--people', action='store_true', default=False, help='Show only entries from human users')    # by default show both
-argp.add_argument('-r', '--robots', action='store_true', default=False, help='Show only entries from robots (zomcat*, robot*)')    # TODO regex
-argp.add_argument('-u', '--user', help='Show only entries matching given substring')     # TODO incl/excl usersm, regex
-group_time_filters = argp.add_mutually_exclusive_group()
-group_time_filters.add_argument('-m', '--minutes', help='Show only entries younger than given minutes')
-group_time_filters.add_argument('-y', '--days', type=int, help='Show entries for given days. Gzipped files included')
-group_severity = argp.add_mutually_exclusive_group()
-group_severity.add_argument('-e', '--errors', action='store_true', default=False, help='Show only entries >= ERROR. Keyword is ignored')
-group_severity.add_argument('--severity', help='Show only messages of certain severity level')
-# Output
-group5 = argp.add_mutually_exclusive_group()
-group5.add_argument('-l', '--single-line', action='store_true', help='Join multiline messages to one line')
-group5.add_argument('-o', '--short', action='store_true', default=False, help='Show only time, db, user, severity, message, query and trunc latter to 80char')
-group_summaries.add_argument('-c', '--conns', action='store_true', default=False, help='Show connection statistics per db/user')
-group_summaries.add_argument('--stats', action='store_true', default=False, help='Showing counts per db/severity')
-group_summaries.add_argument('--graph', action='store_true', default=False, help='Show a basic graph of event distribution over time. Useful with -e/--errors filter')
-# argp.add_argument('--bucket', dest='bucket', default=60, type=int, help='Bucket for aggregations (--graph)')  # TODO non-hourly buckets
-argp.add_argument('-v', '--verbose', dest='verbose', action='store_true', default=False, help='For debugging')
+CSV_FIELDS = [
+    'log_time',
+    'user_name',
+    'database_name',
+    'process_id',
+    'connection_from',
+    'session_id',
+    'session_line_num',
+    'command_tag',
+    'session_start_time',
+    'virtual_transaction_id',
+    'transaction_id',
+    'error_severity',
+    'sql_state_code',
+    'message',
+    'detail',
+    'hint',
+    'internal_query',
+    'internal_query_pos',
+    'context',
+    'query',
+    'query_pos',
+    'location',
+    'application_name',
+]
 
+CSV_FIELDS_SHORT = ['log_time', 'database_name', 'user_name', 'error_severity', 'message', 'query']
+csv.field_size_limit(sys.maxsize)
 
-args = argp.parse_args()
-if not args.keyword and not (args.errors or args.people or args.robots or args.user or args.minutes or
-                                 args.severity or args.stats or args.conns or args.queries or args.graph):
-    argp.print_help()
-    exit(1)
+# should get rid of globals
+args = None
+agg_event_counts_by_severity = defaultdict(dict)   # db : {level: count}
+agg_connection_counts_by_role = defaultdict(dict)   # db: {user: count}
+agg_buckets_for_graphing = {}    # {time: count}
+outfile_writer = None
+min_time = None     # 1st found log entry time
+max_time = None     # last found log entry time
+time_constraint = None
 
-
-logging.basicConfig(format='%(message)s')
-logger = logging.getLogger()
-logger.setLevel((logging.INFO if args.verbose else logging.WARNING))
-
-logger.info('args: %s', args)
-
-outfile = sys.stdout
+matcher_robots = re.compile('^(zomcat|tws|nagios|robot|postgres)')   # TODO turn into a regex param
+matcher_remove_ws = re.compile(r'[\t\s\r\n]+')
 
 
 def get_files_for_days(days, base_glob):
@@ -89,12 +81,6 @@ def filter_out_files_older_than_given_datetime(list_of_filenames, date_constrain
             return list_of_filenames[i:]
         i -= 1
     return list_of_filenames[i:]
-
-
-time_constraint = None
-if args.minutes:
-    time_constraint = datetime.now() - timedelta(minutes=int(args.minutes))
-logging.info("time_constraint = %s", time_constraint)
 
 
 def get_file_inputs():
@@ -127,51 +113,6 @@ def get_file_inputs():
     return files
 
 
-if args.short:
-    args.single_line = True
-
-stats = defaultdict(dict)   # db : {level: count}
-conns = defaultdict(dict)   # db: {user: count}
-buckets = {}    # {time: count}
-
-matcher_r = re.compile('^(zomcat|tws|nagios|robot|postgres)')
-re_remove_ws = re.compile(r'[\t\s\r\n]+')
-
-CSV_FIELDS = [
-    'log_time',
-    'user_name',
-    'database_name',
-    'process_id',
-    'connection_from',
-    'session_id',
-    'session_line_num',
-    'command_tag',
-    'session_start_time',
-    'virtual_transaction_id',
-    'transaction_id',
-    'error_severity',
-    'sql_state_code',
-    'message',
-    'detail',
-    'hint',
-    'internal_query',
-    'internal_query_pos',
-    'context',
-    'query',
-    'query_pos',
-    'location',
-    'application_name',
-]
-
-CSV_FIELDS_SHORT = ['log_time', 'database_name', 'user_name', 'error_severity', 'message', 'query']
-
-csv.field_size_limit(sys.maxsize)
-outfile_writer = None
-if args.short:
-    outfile_writer = csv.DictWriter(outfile, CSV_FIELDS_SHORT)
-else:
-    outfile_writer = csv.DictWriter(outfile, CSV_FIELDS)
-
 def get_log_file_datetime_from_full_name(full_log_file_path):
     path, filename = os.path.split(full_log_file_path)
     file, ext = os.path.splitext(filename)
@@ -179,8 +120,9 @@ def get_log_file_datetime_from_full_name(full_log_file_path):
     # /some/path/postgresql-2013-06-04_095755.csv > 2013-06-04_095755
     return datetime.strptime(filename, '%Y-%m-%d_%H%M%S')
 
+
 def is_robot_user(username):
-    return True if matcher_r.match(username) else False
+    return True if matcher_robots.match(username) else False
 
 
 def line_has_search_kw(line, kw):
@@ -236,12 +178,12 @@ def print_stats(stats, order_by='ERROR'):
                 s[level] = 0
     stats = sorted(stats.items(), key=lambda x: x[1][order_by], reverse=True)
     for db, s in stats:
-        print '"{0:30}": FATAL {1:7}\tERROR {2:7}\tWARNING {3:7}\tLOG {4:7}'.format(db,
+        print '{0:30}: FATAL {1:7}\tERROR {2:7}\tWARNING {3:7}\tLOG {4:7}'.format('"{}"'.format(db),
                                                                            s['FATAL'],
                                                                            s['ERROR'],
                                                                            s['WARNING'],
-                                                                           s['LOG']
-                                                                        )
+                                                                           s['LOG'])
+
 
 def print_conns(conns):
     """ conns={'dbname': {user: count, ...}} """
@@ -308,15 +250,11 @@ def get_bucket(log_time, bucket_width=None):
     return log_time.replace(minute=0, second=0, microsecond=0)
 
 
-min_time = None     # 1st found log entry time
-max_time = None     # last found log entry time
-
-
 def process_file(fp_in, read_from_position=0):
     """ filters through all found rows and returns last read file position """
-    global stats
-    global conns
-    global buckets
+    global agg_event_counts_by_severity
+    global agg_connection_counts_by_role
+    global agg_buckets_for_graphing
     global min_time
     global max_time
 
@@ -372,31 +310,31 @@ def process_file(fp_in, read_from_position=0):
                 continue
 
             if args.stats:
-                if line['error_severity'] not in stats[line['database_name']]:
-                    stats[line['database_name']][line['error_severity']] = 1
+                if line['error_severity'] not in agg_event_counts_by_severity[line['database_name']]:
+                    agg_event_counts_by_severity[line['database_name']][line['error_severity']] = 1
                     continue
-                stats[line['database_name']][line['error_severity']] += 1
+                agg_event_counts_by_severity[line['database_name']][line['error_severity']] += 1
                 continue
 
             if args.conns:
                 if line['command_tag'] == 'authentication':
-                    if line['user_name'] not in conns[line['database_name']]:
-                        conns[line['database_name']][line['user_name']] = 1
+                    if line['user_name'] not in agg_connection_counts_by_role[line['database_name']]:
+                        agg_connection_counts_by_role[line['database_name']][line['user_name']] = 1
                         continue
-                    conns[line['database_name']][line['user_name']] += 1
+                    agg_connection_counts_by_role[line['database_name']][line['user_name']] += 1
                 continue
 
             if args.graph:
                 bucket = get_bucket(log_time)
-                if bucket not in buckets:
-                    buckets[bucket] = 1
+                if bucket not in agg_buckets_for_graphing:
+                    agg_buckets_for_graphing[bucket] = 1
                 else:
-                    buckets[bucket] += 1
+                    agg_buckets_for_graphing[bucket] += 1
                 continue
 
             if args.single_line or args.short:
                 for field in ['message', 'detail', 'hint', 'internal_query', 'context', 'query']:
-                    line[field] = re_remove_ws.sub(' ', line[field])
+                    line[field] = matcher_remove_ws.sub(' ', line[field])
 
             if args.short:
                 line = {key: value for (key, value) in line.items() if key in CSV_FIELDS_SHORT}
@@ -427,7 +365,71 @@ def check_for_next_log_file(last_known_file_full_path):  # could use some filesy
     return None
 
 
-if __name__ == '__main__':
+def main():
+    global args
+    global outfile_writer
+    global time_constraint
+
+    argp = \
+        argparse.ArgumentParser(description='Scans PostgreSQL logs and displays log lines or statistics according to given filters. \
+         Assumes default "csvlog" logging format and by default being in the pg_log folder or specifying a folder e.g. with --globpath=/var/lib/postgresql/*/main/pg_log', add_help=True)
+    group_summaries = argp.add_mutually_exclusive_group()
+    # Input
+    group1 = argp.add_mutually_exclusive_group()
+    group1.add_argument('-s', '--stdin', action='store_true', default=False, help='Read input from stdin')
+    group1.add_argument('-f', '--file', default=None, help='File to grep. Can be Gzip')
+    group1.add_argument('-g', '--globpath', default=DEFAULT_GLOB_PATH, help='Glob pattern for logfiles [default.: {}]'.format(DEFAULT_GLOB_PATH))
+    group_summaries.add_argument('-t', '--tail', action='store_true', default=False, help='Keep running and checking for new input/files')
+    # Filters
+    argp.add_argument('keyword', metavar='KEYWORD', type=str, nargs='?', help='Text to grep for')
+    argp.add_argument('-q', '--queries', action='store_true', default=False, help='Show only SQL statements')
+    argp.add_argument('-d', '--dbname', help='Show only entries from DBs matching given substring')     # TODO regex
+    argp.add_argument('-n', '--no-noise', action='store_true', default=False, help='Try to remove PgAdmin3 noise')
+    argp.add_argument('-p', '--people', action='store_true', default=False, help='Show only entries from human users')    # by default show both
+    argp.add_argument('-r', '--robots', action='store_true', default=False, help='Show only entries from robots (zomcat*, robot*)')    # TODO regex
+    argp.add_argument('-u', '--user', help='Show only entries matching given substring')     # TODO incl/excl usersm, regex
+    group_time_filters = argp.add_mutually_exclusive_group()
+    group_time_filters.add_argument('-m', '--minutes', help='Show only entries younger than given minutes')
+    group_time_filters.add_argument('-y', '--days', type=int, help='Show entries for given days. Gzipped files included')
+    group_severity = argp.add_mutually_exclusive_group()
+    group_severity.add_argument('-e', '--errors', action='store_true', default=False, help='Show only entries >= ERROR. Keyword is ignored')
+    group_severity.add_argument('--severity', help='Show only messages of certain severity level')
+    # Output
+    group5 = argp.add_mutually_exclusive_group()
+    group5.add_argument('-l', '--single-line', action='store_true', help='Join multiline messages to one line')
+    group5.add_argument('-o', '--short', action='store_true', default=False, help='Show only time, db, user, severity, message, query and trunc latter to 80char')
+    group_summaries.add_argument('-c', '--conns', action='store_true', default=False, help='Show connection statistics per db/user')
+    group_summaries.add_argument('--stats', action='store_true', default=False, help='Showing counts per db/severity')
+    group_summaries.add_argument('--graph', action='store_true', default=False, help='Show a basic graph of event distribution over time. Useful with -e/--errors filter')
+    # argp.add_argument('--bucket', dest='bucket', default=60, type=int, help='Bucket for aggregations (--graph)')  # TODO non-hourly buckets
+    argp.add_argument('-v', '--verbose', dest='verbose', action='store_true', default=False, help='For debugging')
+
+    args = argp.parse_args()
+    if not args.keyword and not (args.errors or args.people or args.robots or args.user or args.minutes or
+                                     args.severity or args.stats or args.conns or args.queries or args.graph):
+        argp.print_help()
+        exit(1)
+
+    if args.short:
+        args.single_line = True
+    if args.conns:
+        args.severity = None
+        args.errors = None
+
+    if args.short:
+        outfile_writer = csv.DictWriter(sys.stdout, CSV_FIELDS_SHORT)
+    else:
+        outfile_writer = csv.DictWriter(sys.stdout, CSV_FIELDS)
+
+    if args.minutes:
+        time_constraint = datetime.now() - timedelta(minutes=int(args.minutes))
+        logging.info("time_constraint = %s", time_constraint)
+
+    logging.basicConfig(format='%(message)s')
+    logger = logging.getLogger()
+    logger.setLevel((logging.INFO if args.verbose else logging.WARNING))
+
+    logger.info('args: %s', args)
 
     try:
         if args.stdin:
@@ -454,11 +456,11 @@ if __name__ == '__main__':
             if args.tail:
                 while True:
                     if current_file_fp:
-                        current_file_fp.seek(0, 2)
+                        current_file_fp.seek(0, 2)      # check if the EOF position has increased since last reading
                         eof_position = current_file_fp.tell()
-                    if eof_position > current_file_pos:
-                        current_file_pos = process_file(current_file_fp, current_file_pos)
-                    elif not args.file:
+                        if eof_position > current_file_pos:
+                            current_file_pos = process_file(current_file_fp, current_file_pos)
+                    elif not args.file:                 # if no EOF position movement, maybe log file was rotated
                         next_file = check_for_next_log_file(current_file_name)
                         if next_file:
                             current_file_name = next_file
@@ -473,10 +475,15 @@ if __name__ == '__main__':
         print '\n--- no data ---'
         exit(0)
 
+    # display aggregations if any
     if args.stats:
-        print_stats(stats, order_by='ERROR')
+        print_stats(agg_event_counts_by_severity, order_by='ERROR')
     if args.conns:
-        print_conns(conns)
+        print_conns(agg_connection_counts_by_role)
     if args.graph:
-        buckets = fill_bucket_holes(min(min_time, time_constraint if time_constraint else datetime.now()), buckets)
-        print_graph(buckets)
+        buckets_filled = fill_bucket_holes(min(min_time, time_constraint if time_constraint else datetime.now()), agg_buckets_for_graphing)
+        print_graph(buckets_filled)
+
+
+if __name__ == '__main__':
+    main()
