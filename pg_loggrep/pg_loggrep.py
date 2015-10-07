@@ -13,7 +13,7 @@ import csv
 import os
 from collections import defaultdict
 import gzip
-import select
+
 
 DEFAULT_GLOB_PATH = '.'     # '/var/lib/postgresql/*/main/pg_log'
 PG_LOG_NAMING = '/postgresql-{curdate}*.csv*'
@@ -69,7 +69,6 @@ logger.setLevel((logging.INFO if args.verbose else logging.WARNING))
 logger.info('args: %s', args)
 
 outfile = sys.stdout
-files = None
 
 
 def get_files_for_days(days, base_glob):
@@ -83,33 +82,50 @@ def get_files_for_days(days, base_glob):
     return files
 
 
-if args.file:
-    files = [('args.file', [args.file])]
-elif args.stdin:
-    files = [('sys.stdin', [sys.stdin])]
-else:
-    if args.days:
-        files = get_files_for_days(args.days, args.globpath)
-    else:
-        glob_path = args.globpath + (PG_LOG_NAMING if args.globpath.find('-') == -1 else '' ).format(curdate=datetime.now().strftime('%Y-%m-%d'))
-        logging.info('glob_path: %s', glob_path)
-        files = glob.glob(glob_path)    # we assume if '-' is there then full glob with date is provided
-    if len(files) == 0:
-        logging.error('No logs found! Are you in pg_log folder or is --glob pointing to it?')
-        exit(1)
-    files.sort()
-    files_by_instance = defaultdict(list)
-    for f in files:
-        path, filename = os.path.split(f)
-        files_by_instance[path].append(f)
-    logging.info("found files: %s", files)
-    files = files_by_instance.items()
-    files.sort(key=lambda x: x[0])
+def filter_out_files_older_than_given_datetime(list_of_filenames, date_constraint):
+    i = len(list_of_filenames) - 1  # the last file we need always
+    while i > 0:
+        if get_log_file_datetime_from_full_name(list_of_filenames[i]) < date_constraint:
+            return list_of_filenames[i:]
+        i -= 1
+    return list_of_filenames[i:]
+
 
 time_constraint = None
 if args.minutes:
     time_constraint = datetime.now() - timedelta(minutes=int(args.minutes))
 logging.info("time_constraint = %s", time_constraint)
+
+
+def get_file_inputs():
+
+    if args.file:
+        files = [('args.file', [args.file])]
+    elif args.stdin:
+        files = [('sys.stdin', [sys.stdin])]
+    else:
+        if args.days:
+            files = get_files_for_days(args.days, args.globpath)
+        else:
+            glob_path = args.globpath + (PG_LOG_NAMING if args.globpath.find('-') == -1 else '' ).format(curdate=datetime.now().strftime('%Y-%m-%d'))
+            logging.info('glob_path: %s', glob_path)
+            files = glob.glob(glob_path)    # we assume if '-' is there then full glob with date is provided
+        if len(files) == 0:
+            return []
+
+        files.sort()
+        files_by_instance = defaultdict(list)
+        for f in files:
+            path, filename = os.path.split(f)
+            files_by_instance[path].append(f)
+        logging.info("found files: %s", files)
+        files = files_by_instance.items()
+        files.sort(key=lambda x: x[0])
+        if args.minutes and len(files) > 1:
+            files = filter_out_files_older_than_given_datetime(files, time_constraint)   # let's remove files definitely older than --minutes
+
+    return files
+
 
 if args.short:
     args.single_line = True
@@ -162,16 +178,6 @@ def get_log_file_datetime_from_full_name(full_log_file_path):
     filename = file[file.index('-')+1:]
     # /some/path/postgresql-2013-06-04_095755.csv > 2013-06-04_095755
     return datetime.strptime(filename, '%Y-%m-%d_%H%M%S')
-
-
-def filter_out_files_older_than_given_datetime(list_of_filenames, date_constraint):
-    i = len(list_of_filenames) - 1  # the last file we need always
-    while i > 0:
-        if get_log_file_datetime_from_full_name(list_of_filenames[i]) < date_constraint:
-            return list_of_filenames[i:]
-        i -= 1
-    return list_of_filenames[i:]
-
 
 def is_robot_user(username):
     return True if matcher_r.match(username) else False
@@ -431,27 +437,25 @@ if __name__ == '__main__':
             current_file_fp = None
             current_file_pos = None
 
-            while True:
-                if current_file_name is None:
-                    for instance_path, instance_files in files:
-                        logging.info('########## processing: %s ##########', instance_path)
+            for instance_path, instance_files in get_file_inputs():
+                logging.info('########## processing: %s ##########', instance_path)
 
-                        if args.minutes and len(instance_files) > 1 and not args.file:
-                            instance_files = filter_out_files_older_than_given_datetime(instance_files, time_constraint)   # let's remove files definitely older than --minutes
+                for f in instance_files:
+                    logging.info('### doing input file: %s ###', f)
 
-                        for f in instance_files:
-                            logging.info('### doing input file: %s ###', f)
+                    if f.endswith('.gz'):
+                        with gzip.open(f, 'rb') as fp:
+                            process_file(fp)
+                    else:
+                        current_file_name = f
+                        current_file_fp = open(f)
+                        current_file_pos = process_file(current_file_fp)
 
-                            if f.endswith('.gz'):
-                                with gzip.open(f, 'rb') as fp:
-                                    process_file(fp)
-                            else:
-                                current_file_name = f
-                                current_file_fp = open(f)
-                                current_file_pos = process_file(current_file_fp)
-                if args.tail:
-                    current_file_fp.seek(0, 2)
-                    eof_position = current_file_fp.tell()
+            if args.tail:
+                while True:
+                    if current_file_fp:
+                        current_file_fp.seek(0, 2)
+                        eof_position = current_file_fp.tell()
                     if eof_position > current_file_pos:
                         current_file_pos = process_file(current_file_fp, current_file_pos)
                     elif not args.file:
@@ -460,9 +464,7 @@ if __name__ == '__main__':
                             current_file_name = next_file
                             current_file_fp = open(current_file_name)
                             current_file_pos = process_file(current_file_fp)
-                else:
-                    break
-                time.sleep(1)
+                    time.sleep(1)
 
     except IOError, KeyboardInterrupt:
         pass
