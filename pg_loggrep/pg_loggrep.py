@@ -6,12 +6,14 @@ import re
 import argparse
 import logging
 import glob
+import time
 from datetime import datetime
 from datetime import timedelta
 import csv
 import os
 from collections import defaultdict
 import gzip
+import select
 
 DEFAULT_GLOB_PATH = '.'     # '/var/lib/postgresql/*/main/pg_log'
 PG_LOG_NAMING = '/postgresql-{curdate}*.csv*'
@@ -21,11 +23,13 @@ POSTGRES_DATE_FORMAT = '%Y-%m-%d %H:%M:%S.%f %Z'
 argp = \
     argparse.ArgumentParser(description='Scans PostgreSQL logs and displays log lines or statistics according to given filters. \
      Assumes default "csvlog" logging format and by default being in the pg_log folder or specifying a folder e.g. with --globpath=/var/lib/postgresql/*/main/pg_log', add_help=True)
+group_summaries = argp.add_mutually_exclusive_group()
 # Input
 group1 = argp.add_mutually_exclusive_group()
 group1.add_argument('-s', '--stdin', action='store_true', default=False, help='Read input from stdin')
 group1.add_argument('-f', '--file', default=None, help='File to grep. Can be Gzip')
 group1.add_argument('-g', '--globpath', default=DEFAULT_GLOB_PATH, help='Glob pattern for logfiles [default.: {}]'.format(DEFAULT_GLOB_PATH))
+group_summaries.add_argument('-t', '--tail', action='store_true', default=False, help='Keep running and checking for new input/files')
 # Filters
 argp.add_argument('keyword', metavar='KEYWORD', type=str, nargs='?', help='Text to grep for')
 argp.add_argument('-q', '--queries', action='store_true', default=False, help='Show only SQL statements')
@@ -44,7 +48,6 @@ group_severity.add_argument('--severity', help='Show only messages of certain se
 group5 = argp.add_mutually_exclusive_group()
 group5.add_argument('-l', '--single-line', action='store_true', help='Join multiline messages to one line')
 group5.add_argument('-o', '--short', action='store_true', default=False, help='Show only time, db, user, severity, message, query and trunc latter to 80char')
-group_summaries = argp.add_mutually_exclusive_group()
 group_summaries.add_argument('-c', '--conns', action='store_true', default=False, help='Show connection statistics per db/user')
 group_summaries.add_argument('--stats', action='store_true', default=False, help='Showing counts per db/severity')
 group_summaries.add_argument('--graph', action='store_true', default=False, help='Show a basic graph of event distribution over time. Useful with -e/--errors filter')
@@ -303,14 +306,17 @@ min_time = None     # 1st found log entry time
 max_time = None     # last found log entry time
 
 
-def process_file(fp_in):
+def process_file(fp_in, read_from_position=0):
+    """ filters through all found rows and returns last read file position """
     global stats
     global conns
     global buckets
     global min_time
     global max_time
 
-    reader = csv.DictReader(fp_in, fieldnames = CSV_FIELDS, restval = '')
+    if read_from_position > 0:
+        fp_in.seek(read_from_position)
+    reader = csv.DictReader(fp_in, fieldnames=CSV_FIELDS, restval='')
     '''reader: csv.DictReader'''
 
     for line in reader:
@@ -393,31 +399,77 @@ def process_file(fp_in):
 
             outfile_writer.writerow(line)
 
+    return fp_in.tell()
+
+
+def process_stdin():
+    logging.info('########## processing: stdin ##########')
+
+    if args.tail:
+        raise Exception('Tailing stdin not implemented yet!')
+
+    process_file(sys.stdin)
+
+
+def check_for_next_log_file(last_known_file_full_path):  # could use some filesystem monitoring?
+    path = os.path.dirname(last_known_file_full_path)
+    listing = glob.glob(os.path.join(path, 'postgresql*.csv'))
+    listing.sort(key=os.path.getctime)
+    i = listing.index(last_known_file_full_path)
+    if len(listing) > 1 and i < len(listing)-1:
+        return listing[i+1]
+    return None
+
 
 if __name__ == '__main__':
 
     try:
-        for instance_path, instance_files in files:
-            logging.info('########## processing: %s ##########', instance_path)
+        if args.stdin:
+            process_stdin()
+        else:
+            current_file_name = None
+            current_file_fp = None
+            current_file_pos = None
 
-            if args.minutes and len(instance_files) > 1 and not args.file:
-                instance_files = filter_out_files_older_than_given_datetime(instance_files, time_constraint)   # let's remove files definitely older than --minutes
+            while True:
+                if current_file_name is None:
+                    for instance_path, instance_files in files:
+                        logging.info('########## processing: %s ##########', instance_path)
 
-            for f in instance_files:
-                logging.info('### doing input file: %s ###', f)
+                        if args.minutes and len(instance_files) > 1 and not args.file:
+                            instance_files = filter_out_files_older_than_given_datetime(instance_files, time_constraint)   # let's remove files definitely older than --minutes
 
-                if args.stdin:
-                    process_file(f)
+                        for f in instance_files:
+                            logging.info('### doing input file: %s ###', f)
+
+                            if f.endswith('.gz'):
+                                with gzip.open(f, 'rb') as fp:
+                                    process_file(fp)
+                            else:
+                                current_file_name = f
+                                current_file_fp = open(f)
+                                current_file_pos = process_file(current_file_fp)
+                if args.tail:
+                    current_file_fp.seek(0, 2)
+                    eof_position = current_file_fp.tell()
+                    if eof_position > current_file_pos:
+                        current_file_pos = process_file(current_file_fp, current_file_pos)
+                    elif not args.file:
+                        next_file = check_for_next_log_file(current_file_name)
+                        if next_file:
+                            current_file_name = next_file
+                            current_file_fp = open(current_file_name)
+                            current_file_pos = process_file(current_file_fp)
                 else:
-                    if f.endswith('.gz'):
-                        with gzip.open(f, 'rb') as fp:
-                            process_file(fp)
-                    else:
-                        with open(f) as fp:
-                            process_file(fp)
+                    break
+                time.sleep(1)
 
     except IOError, KeyboardInterrupt:
         pass
+
+    if not min_time:
+        print '\n--- no data ---'
+        exit(0)
 
     if args.stats:
         print_stats(stats, order_by='ERROR')
