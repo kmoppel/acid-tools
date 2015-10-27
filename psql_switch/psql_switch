@@ -29,6 +29,7 @@ def get_all_shards_from_config(config, base_dbname):     # db for db1, db2,...
             yield db
 
 def pass_to_psql(service, sql=None, params=[]):
+    # print sql, params
     if sql:
         subprocess.call([PSQL_CMD, "service=" + service, '-c' + sql] + params)
     else:
@@ -61,6 +62,7 @@ def main():
     argp.add_argument('--list', dest='list', help='list all DBs from ~/.pg_service.conf', action='store_true')
     argp.add_argument('--generate-links', help='creates symbolic links for all DBs found in service file in current directory', action='store_true')
     argp.add_argument('--nostop', help='ignore failures', action='store_true')
+    argp.add_argument('--stop', help='stop on failures', action='store_true')
     argp.add_argument('--cs', '--conn-string', dest='conn_string', help='print connection string to stdout', action='store_true')
     argp.add_argument('--i', '--info', dest='info', help='show key information about the cluster - postgres version + ip/port + uptime', action='store_true')
     argp.add_argument('--s', '--schema', dest='schema', help='list all distinct user schemas with latest APIs', action='store_true')
@@ -99,9 +101,15 @@ def main():
         dbname = dbname[:-3]
         service_names = get_all_shards_from_config(service_config, dbname)
 
-    nostop = ''
+    params_to_psql = sys.argv[1:]
+    nostop = None
+
     if args.nostop:
-        nostop = 'STOP_ON_ERROR=0'
+        params_to_psql.remove('--nostop')
+        params_to_psql.extend(['--set', 'ON_ERROR_STOP=0'])
+    elif args.stop:
+        params_to_psql.remove('--stop')
+        params_to_psql.extend(['--set', 'ON_ERROR_STOP=1'])
 
     for service_name in service_names:
         if not ('-q' in sys.argv or '--quiet' in sys.argv):
@@ -146,7 +154,7 @@ def main():
             sql = "select c.relname, sa1.query as locked_query, sa2.pid as locking_pid, sa2.usename as locking_user, sa2.query as locking_query, now() - sa2.query_start as duration from pg_stat_activity sa1, pg_locks l1, pg_locks l2, pg_class c, pg_stat_activity sa2 where sa1.waiting and l1.pid = sa1.pid and not l1.granted and l2.relation = l1.relation and l2.granted and c.oid = l2.relation and sa2.pid = l2.pid order by 6 desc"
             pass_to_psql(service_name, sql)
         else:
-            pass_to_psql(service_name, params=sys.argv[1:] + [nostop])
+            pass_to_psql(service_name, params=params_to_psql)
 
 if __name__ == '__main__':
     main()
