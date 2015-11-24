@@ -86,11 +86,13 @@ ORDER BY
 
 
 def shell_exec_with_output(commands):
-    process = subprocess.Popen(commands, stdout=subprocess.PIPE, shell=True)
+    process = subprocess.Popen(commands, stdout=subprocess.PIPE, shell=True, stderr=subprocess.STDOUT)
     exitcode = process.wait()
+    output = process.stdout.read().strip()
     if exitcode != 0:
-        logging.error('error executing: ', commands)
-    return exitcode, process.stdout.read().strip()
+        logging.error('error executing: %s', commands)
+        logging.error(output)
+    return exitcode, output
 
 
 def get_bloated_tables(min_bloat_ratio=None, min_bloat_size_mb=None):
@@ -112,8 +114,12 @@ def call_pg_repack(table_name_full, args, unknown_args):
     logging.info('executing: %s', PG_REPACK_CMD)
     if not args.run:
         return
-    retcode, out = shell_exec_with_output(PG_REPACK_CMD)
-    logging.info(out)
+
+    retcode, output = shell_exec_with_output(PG_REPACK_CMD)
+    if retcode != 0 and args.stop_on_error:
+        logging.error('exiting because of a processing error')
+        exit(1)
+    logging.info(output)
 
 
 args = None
@@ -135,6 +141,7 @@ def main():
     argp.add_argument('-r', '--run', help='Do re-packing. Default is to just display to-be-affected tables', action='store_true')
     argp.add_argument('-t', '--table', help='Tables to possibly re-pack', action='append')
     argp.add_argument('-q', '--quiet', help='No chat, only errors (Cronjob mode)', action='store_true')
+    argp.add_argument('--stop-on-error', help='Exit program on 1st re-packing error', action='store_true')
 
     global args
     args, unknown_args = argp.parse_known_args()
@@ -165,6 +172,7 @@ def main():
                                                                                           b['table_size'])
         call_pg_repack(b['table_name_full'], args, unknown_args)
         i += 1
+    logging.info('')
     logging.info('Finished. %s tables processed.', i)
 
 
