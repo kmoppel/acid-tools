@@ -6,20 +6,11 @@ import subprocess
 import psycopg2
 import psycopg2.extras
 import time
+import logging
 
 # TODO nice feature would be pg_stattuple support, for exact bloat calculations
 
-
-def shell_exec_with_output(commands):
-    process = subprocess.Popen(commands, stdout=subprocess.PIPE, shell=True)
-    exitcode = process.wait()
-    if exitcode != 0:
-        print 'error executing: ', commands
-    return process.stdout.read().strip()
-
-
-def get_bloated_tables(min_bloat_ratio=None, min_bloat_size_mb=None):
-    sql_table_bloat = """
+SQL_TABLE_BLOAT = """
 SELECT
   schemaname||'.'||tblname as table_name_full,
   pg_size_pretty(bloat_size::numeric) as bloat_size,
@@ -92,10 +83,21 @@ WHERE
 ORDER BY
   bloat_ratio DESC
     """
+
+
+def shell_exec_with_output(commands):
+    process = subprocess.Popen(commands, stdout=subprocess.PIPE, shell=True)
+    exitcode = process.wait()
+    if exitcode != 0:
+        logging.error('error executing: ', commands)
+    return exitcode, process.stdout.read().strip()
+
+
+def get_bloated_tables(min_bloat_ratio=None, min_bloat_size_mb=None):
     conn = psycopg2.connect(host=args.host, port=args.port, dbname=args.dbname, user=args.username)
-    conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    conn.autocommit = True
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(sql_table_bloat, {'min_bloat_ratio': min_bloat_ratio, 'min_bloat_size_mb': min_bloat_size_mb})
+    cur.execute(SQL_TABLE_BLOAT, {'min_bloat_ratio': min_bloat_ratio, 'min_bloat_size_mb': min_bloat_size_mb})
     return cur.fetchall()
 
 
@@ -107,11 +109,11 @@ def call_pg_repack(table_name_full, args, unknown_args):
         if k in ['host', 'port', 'dbname', 'username']:
             PG_REPACK_CMD += ' --{} {}'.format(k, v)
     PG_REPACK_CMD += ' ' + ' '.join(unknown_args)
-    print 'executing:', PG_REPACK_CMD
+    logging.info('executing: %s', PG_REPACK_CMD)
     if not args.run:
         return
-    out = shell_exec_with_output(PG_REPACK_CMD)
-    print out
+    retcode, out = shell_exec_with_output(PG_REPACK_CMD)
+    logging.info(out)
 
 
 args = None
@@ -132,34 +134,38 @@ def main():
     argp.add_argument('--min-bloat-size-mb', help='Min bloat size in MB for table to be considered for re-packing', default=10, type=int)
     argp.add_argument('-r', '--run', help='Do re-packing. Default is to just display to-be-affected tables', action='store_true')
     argp.add_argument('-t', '--table', help='Tables to possibly re-pack', action='append')
+    argp.add_argument('-q', '--quiet', help='No chat, only errors (Cronjob mode)', action='store_true')
 
     global args
     args, unknown_args = argp.parse_known_args()
-    print args, unknown_args
 
-    out = shell_exec_with_output('which pg_repack')
-    print 'Using pg_repack from path:', out
+    logging.basicConfig(level=(logging.ERROR if args.quiet else logging.INFO), format='%(asctime)s (%(levelname)s) %(message)s')
+    logging.info('args: %s, unknown_args: %s', args, unknown_args)
+
+    retcode, out = shell_exec_with_output('which pg_repack')
+    logging.info('Using pg_repack from path: %s', out)
+
     if args.run:
-        print 'NOT in dry-run mode, sleeping 3s...'
+        logging.info('NOT in dry-run mode, sleeping 3s...')
         time.sleep(3)
 
     bloated = get_bloated_tables(min_bloat_ratio=args.min_bloat_ratio, min_bloat_size_mb=args.min_bloat_size_mb)
 
     if not len(bloated):
-        print 'No matching tables found'
+        logging.info('No matching tables found')
         return
 
     i = 0
     for b in bloated:
         if args.table and b['table_name_full'] not in args.table:
             continue
-        print 'Doing table: "{}" (bloat ratio: {}, bloat_size: {}, table_size {})'.format(b['table_name_full'],
+        logging.info('Doing table: "%s" (bloat ratio: %s, bloat_size: %s, table_size %s)', b['table_name_full'],
                                                                                           b['bloat_ratio'],
                                                                                           b['bloat_size'],
                                                                                           b['table_size'])
         call_pg_repack(b['table_name_full'], args, unknown_args)
         i += 1
-    print 'Finished.', i, 'tables processed.'
+    logging.info('Finished. %s tables processed.', i)
 
 
 if __name__ == '__main__':
