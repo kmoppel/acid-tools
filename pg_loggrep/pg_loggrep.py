@@ -74,13 +74,16 @@ def get_files_for_days(days, base_glob):
     return files
 
 
-def filter_out_files_older_than_given_datetime(list_of_filenames, date_constraint):
-    i = len(list_of_filenames) - 1  # the last file we need always
-    while i > 0:
-        if get_log_file_datetime_from_full_name(list_of_filenames[i]) < date_constraint:
-            return list_of_filenames[i:]
-        i -= 1
-    return list_of_filenames[i:]
+def filter_out_files_older_than_given_datetime(list_of_paths_and_filenames, date_constraint):   # [('path', [files,...]),]
+    ret = []
+    for path, list_of_filenames in list_of_paths_and_filenames:
+        i = len(list_of_filenames) - 1  # the last file we need always
+        while i > 0:
+            if get_log_file_datetime_from_full_name(list_of_filenames[i]) < date_constraint:
+                break
+            i -= 1
+        ret.append((path, list_of_filenames[i:]))
+    return ret
 
 
 def get_file_inputs():
