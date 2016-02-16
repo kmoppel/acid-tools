@@ -12,6 +12,7 @@ from datetime import timedelta
 import csv
 import os
 from collections import defaultdict
+from collections import Counter
 import gzip
 
 
@@ -54,13 +55,54 @@ args = None
 agg_event_counts_by_severity = defaultdict(dict)   # db : {level: count}
 agg_connection_counts_by_role = defaultdict(dict)   # db: {user: count}
 agg_buckets_for_graphing = {}    # {time: count}
+error_pattern_extractor = None      # TODO expand beyond errors to get an idea how is the log lines distibution
 outfile_writer = None
 min_time = None     # 1st found log entry time
 max_time = None     # last found log entry time
 time_constraint = None
 
 matcher_robots = re.compile('^(zomcat|tws|nagios|robot|postgres)')   # TODO turn into a regex param
-matcher_remove_ws = re.compile(r'[\t\s\r\n]+')
+matcher_remove_ws = re.compile(r'\s+')
+
+
+class LogEntryPatternsExtractor(object):
+    """This class deals with extracting patterns of errors out of row entries (removing noise and literals via regexes)"""
+    # Could also use https://github.com/andialbrecht/sqlparse which should be more foolproof but probably slower
+
+    def __init__(self):
+        self.counter = Counter()     # {('db':'pattern'): count}}
+
+    SUBSTITUTIONS = [
+        (re.compile(r'\s+'), ' '),                  # extra whitespace
+        (re.compile(r"'\{?.*?\}?'"), "'X'"),        # literal strings
+        (re.compile(r"[\s\(]+?[\d+,\.]+[\s\)]*?"), " X "),          # numbers separated by whitespace
+        (re.compile(r"(\w\s?=\s?)[\d,\.]+"), r'\1X'),          #  write=239.532 s >>> write=X s
+        # TODO more complex cases need testing
+        # (re.compile(r"\s+in\s*\([\s']?[\.,\s\d]+[\s']?\)", re.I), " in (X)"),   # IN (1,2) >>> IN (X)
+        # (re.compile(r'(\W+)([\d\.,]+?)(\W*?)'), r'\1X\3'),   # "col>=1" >>> col>=X
+    ]
+
+    @staticmethod
+    def apply_substitutions(in_str):
+        """removes literal strings + all numbers"""
+
+        if in_str is None or in_str.strip() == '':
+            return ''
+        for sub_regex, sub_char in LogEntryPatternsExtractor.SUBSTITUTIONS:
+            # print t
+            in_str = sub_regex.sub(sub_char, in_str)
+        return in_str
+
+    @staticmethod
+    def get_signature_for_single_log_entry(e):
+        # print e['message'], e['detail'], e['query']
+        return LogEntryPatternsExtractor.apply_substitutions(e['message'])
+
+    def add_log_enty_for_signaturing(self, log_entry):
+        err_sig = LogEntryPatternsExtractor.get_signature_for_single_log_entry(log_entry)
+        logging.debug('extracted pattern for entry %s => %s', log_entry, err_sig)
+        self.counter.update([(log_entry['database_name'], log_entry['error_severity'],  err_sig)])
+        return err_sig
 
 
 def get_files_for_days(days, base_glob):
@@ -236,6 +278,19 @@ def print_graph(buckets):
     print '--- last bucket start time {} ---'.format(buckets[-1].strftime('%Y-%m-%d %H:00'))
 
 
+def print_top_patterns(limit=10):
+    print '\n--- TOP PATTERNS SUMMARY for timerange {} to {} ---'.format(min_time.strftime('%Y-%m-%d %H:%M'), max_time.strftime('%Y-%m-%d %H:%M'))
+    print '-'*60
+    print '{:<10}{:<10}{:<30}{}'.format('Count', 'Severity', 'Dbname', 'Pattern')
+    print '-'*60
+    top_patterns = error_pattern_extractor.counter.most_common(limit)
+    for db_severity_pattern, count in top_patterns:
+        db, severity, pattern = db_severity_pattern
+        print '{:<10}{:<10}{:<30}{}'.format(count, severity, db, pattern if len(pattern) <= 80 else pattern[0:78] + '..')
+    print '-'*60
+    print '{0:<10}Total'.format(sum(error_pattern_extractor.counter.values()))
+
+
 def fill_bucket_holes(min_time, buckets):
     first_bucket = min_time.replace(minute=0, second=0, microsecond=0)
     last_bucket = datetime.now().replace(minute=0, second=0, microsecond=0)
@@ -312,19 +367,24 @@ def process_file(fp_in, read_from_position=0):
             if args.no_noise and is_noise(line):
                 continue
 
-            if args.stats:
-                if line['error_severity'] not in agg_event_counts_by_severity[line['database_name']]:
-                    agg_event_counts_by_severity[line['database_name']][line['error_severity']] = 1
-                    continue
-                agg_event_counts_by_severity[line['database_name']][line['error_severity']] += 1
-                continue
-
             if args.conns:
                 if line['command_tag'] == 'authentication':
                     if line['user_name'] not in agg_connection_counts_by_role[line['database_name']]:
                         agg_connection_counts_by_role[line['database_name']][line['user_name']] = 1
                         continue
                     agg_connection_counts_by_role[line['database_name']][line['user_name']] += 1
+            elif line['message'].startswith('connection received') or line['command_tag'] == 'authentication':
+                continue
+
+            if args.top_patterns:
+                error_pattern_extractor.add_log_enty_for_signaturing(line)
+                continue
+
+            if args.stats:
+                if line['error_severity'] not in agg_event_counts_by_severity[line['database_name']]:
+                    agg_event_counts_by_severity[line['database_name']][line['error_severity']] = 1
+                    continue
+                agg_event_counts_by_severity[line['database_name']][line['error_severity']] += 1
                 continue
 
             if args.graph:
@@ -372,6 +432,7 @@ def main():
     global args
     global outfile_writer
     global time_constraint
+    global error_pattern_extractor
 
     argp = \
         argparse.ArgumentParser(description='Scans PostgreSQL logs and displays log lines or statistics according to given filters. \
@@ -400,16 +461,17 @@ def main():
     # Output
     group5 = argp.add_mutually_exclusive_group()
     group5.add_argument('-l', '--single-line', action='store_true', help='Join multiline messages to one line')
-    group5.add_argument('-o', '--short', action='store_true', default=False, help='Show only time, db, user, severity, message, query and trunc latter to 80char')
-    group_summaries.add_argument('-c', '--conns', action='store_true', default=False, help='Show connection statistics per db/user')
-    group_summaries.add_argument('--stats', action='store_true', default=False, help='Showing counts per db/severity')
-    group_summaries.add_argument('--graph', action='store_true', default=False, help='Show a basic graph of event distribution over time. Useful with -e/--errors filter')
+    group5.add_argument('-o', '--short', action='store_true', help='Show only time, db, user, severity, message, query and trunc latter to 80char')
+    group_summaries.add_argument('-c', '--conns', action='store_true', help='Show connection statistics per db/user')
+    group_summaries.add_argument('--stats', action='store_true', help='Showing counts per db/severity')
+    group_summaries.add_argument('--graph', action='store_true', help='Show a basic graph of event distribution over time. Useful with -e/--errors filter')
+    group_summaries.add_argument('--top-patterns', type=int, default=0, metavar='INTEGER', help='Show top X "message" field patterns. Useful with -e/--errors filter')
+    argp.add_argument('-v', '--verbose', dest='verbose', action='store_true', help='More chat for debugging')
     # argp.add_argument('--bucket', dest='bucket', default=60, type=int, help='Bucket for aggregations (--graph)')  # TODO non-hourly buckets
-    argp.add_argument('-v', '--verbose', dest='verbose', action='store_true', default=False, help='For debugging')
 
     args = argp.parse_args()
     if not args.keyword and not (args.errors or args.people or args.robots or args.user or args.minutes or
-                                     args.severity or args.stats or args.conns or args.queries or args.graph):
+                                     args.severity or args.stats or args.conns or args.queries or args.graph or args.top_patterns):
         argp.print_help()
         exit(1)
 
@@ -418,6 +480,8 @@ def main():
     if args.conns:
         args.severity = None
         args.errors = None
+    if args.top_patterns:
+        error_pattern_extractor = LogEntryPatternsExtractor()
 
     if args.short:
         outfile_writer = csv.DictWriter(sys.stdout, CSV_FIELDS_SHORT)
@@ -486,6 +550,8 @@ def main():
     if args.graph:
         buckets_filled = fill_bucket_holes(min(min_time, time_constraint if time_constraint else datetime.now()), agg_buckets_for_graphing)
         print_graph(buckets_filled)
+    if args.top_patterns:
+        print_top_patterns(limit=args.top_patterns)
 
 
 if __name__ == '__main__':
