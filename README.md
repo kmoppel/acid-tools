@@ -2,7 +2,7 @@
 
 **Various tools around PostgreSQL monitoring/management (mostly Python scripts)**
 
-All scripts have a --help flag to explain usage
+All scripts have a --help flag to explain usage.
 
 ## idler_terminator
 
@@ -11,8 +11,9 @@ Rules for "idle time", host, database and username exclusion/inclusion are confi
 
 ## niceupdate
 
-A script for performing bigger data updates in a safe, controlled and visual (progress bars) manner by chunking
+A script for performing bigger data updates in a safe, controlled and observable (progress indication) manner by chunking
 the workload and by reading load/xlog feedback from the DB host. Databases, update commands and chunk sizes are configurable via a yaml file (see --help).
+More information on tool's [Wiki page] (https://github.com/zalando/acid-tools/wiki/Niceupdate).
 
 ## pg_loggrep
 
@@ -34,7 +35,7 @@ Show client connection statistics by database/user + general statistics for the 
 ./pg_loggrep --conns
 ```
 
-Show 5 most frequent warning patterns (query variables removed) for the last hour
+Show 5 most frequent warning patterns (patterns are created by stripping string literals from the 'message' part of log entries) for the last hour
 
 ```
 ./pg_loggrep --top-patterns 5 -m 60 --severity WARNING
@@ -42,12 +43,12 @@ Show 5 most frequent warning patterns (query variables removed) for the last hou
 
 ## pg_repack_wrapper
 
-A light wrapper around [pg_repack](https://github.com/reorg/pg_repack) tool, providing re-packing of only bloated tables, starting from the most bloated ones
+A light wrapper around [pg_repack](https://github.com/reorg/pg_repack) tool, providing re-packing of only bloated tables, starting from the most bloated ones.
 
 ## psql_switch
 
 Generates wrappers for the "psql" command line tool, connecting directly to the right database by name and providing
-handy status information scripts. Needs the libpq "connection service file" (~/.pg_service.conf) to be there for input
+handy status information scripts. Needs the libpq "connection service file" (~/.pg_service.conf) to be there for input.
 
 *Usage samples:*
 
