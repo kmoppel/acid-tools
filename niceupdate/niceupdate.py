@@ -13,7 +13,7 @@ import termios
 import select
 import six
 from six.moves import reduce
-from six.moves.queue import Queue
+import six.moves.queue as Queue
 import types
 import yaml
 import time
