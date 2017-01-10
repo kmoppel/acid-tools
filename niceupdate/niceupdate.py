@@ -11,7 +11,9 @@ import argparse
 import logging
 import termios
 import select
+import six
 from six.moves.queue import Queue
+import types
 import yaml
 import time
 import math
@@ -19,6 +21,12 @@ import sys
 import tty
 import os
 import re
+
+
+if six.PY2:
+    list_type = types.List
+else:
+    list_type = list
 
 CONFIG_FILE = os.path.expanduser('~/.niceupdate.conf')
 POISON = object()
@@ -708,9 +716,8 @@ def read_database_configuration():
     except BaseException as e:
         logger.exception('error while loading config from custom_database_config')
 
-    import types
     import json
-    if type(res) == types.ListType and len(res) > 0:
+    if type(res) == list_type and len(res) > 0:
         return res
     # else: if this fails, we try user configuration
     try:
@@ -719,7 +726,7 @@ def read_database_configuration():
     except BaseException as e:
         logger.exception('Error reading ' + CONFIG_FILE)
         raise Exception(e)
-    if type(res) == types.ListType and len(res) > 0:
+    if type(res) == list_type and len(res) > 0:
         return res
     else:
         raise Exception('No database configuration found')
