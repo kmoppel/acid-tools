@@ -51,6 +51,7 @@ class PlaceholderParseException(Exception):
 
 SQL_GET_TIMEOUT = "select current_setting('statement_timeout')"
 SQL_SET_TIMEOUT = 'set statement_timeout = %s'
+SQL_SET_REPLICATION_ROLE = "set session_replication_role = 'replica'"
 SQL_GETLOAD = "select val from public.nice_get_server_information('load1')"
 SQL_GETXLOG = "select val/1024/1024/1024 as xlogfree from public.nice_get_server_information('xlogfreesize')"
 SQL_DROP_PLPYTHONFUNC = 'drop function if exists public.nice_get_server_information(text)'
@@ -170,6 +171,8 @@ vacuum_table: schema.table
                       help='Uninstall server funtion from database specified in file')
     argp.add_argument('-i', '--install', dest='install', action='store_true',
                       help='Install server funtion on database specified in file')
+    argp.add_argument('--disable-triggers', dest='disable_triggers', default=False, action='store_true',
+                      help='disable triggers on all tables in the niceupdate database session')
     return argp.parse_args()
 
 
@@ -192,6 +195,7 @@ def load_config(args):
     document['vacuum_cycles'] = args.vacuum_cycles or document.get('vacuum_cycles') or 0
     document['vacuum_delay'] = args.vacuum_delay or document.get('vacuum_delay') or 0
     document['environment'] = args.environment or document.get('environment', None)
+    document['disable_triggers'] = args.disable_triggers or document.get('disable_triggers', False)
     if not document['environment']:
         sys.stderr.write('Database environment missing.\n')
         sys.exit(1)
@@ -211,12 +215,14 @@ def load_config(args):
     return document
 
 
-def connect(phost, pport, pdbname, pusername, ppassword):
+def connect(phost, pport, pdbname, pusername, disable_triggers=False):
     """Returns tupel (connection, cursor)"""
 
-    conn = psycopg2.connect(host=phost, database=pdbname, port=pport, user=pusername, password=ppassword,
+    conn = psycopg2.connect(host=phost, database=pdbname, port=pport, user=pusername,
                             application_name='niceupdate')
     cur = conn.cursor(cursor_factory=DictCursor)
+    if disable_triggers:
+        cur.execute(SQL_SET_REPLICATION_ROLE)
     return conn, cur
 
 
@@ -363,7 +369,7 @@ class KindlyUpdate(object):
         self.canceled = False
         self.commitrows = config['commitrows'] or config['chunksize']
         self.config = config
-        self.conn, self.cur = connect(host, port, database, config['user'], None)
+        self.conn, self.cur = connect(host, port, database, config['user'], config.get('disable_triggers', False))
         self.dbname = database
         self.delay = config.get('delay', 0)
         self.eta = datetime.timedelta(seconds=0)
@@ -670,7 +676,7 @@ class InputReader(object):
 
 
 def install(pusername, sql, db):
-    conn, cur = connect(db[1], db[2], db[3], pusername, None)
+    conn, cur = connect(db[1], db[2], db[3], pusername)
     cur.execute(sql)
     conn.commit()
     conn.close()
