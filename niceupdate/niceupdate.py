@@ -781,7 +781,7 @@ def start_threads(dbs, config):
         if not kindly.check_precondition():
             return []
         threadlist.append((worker, kindly))
-    map(lambda x: x[0].start(), threadlist)
+    list(map(lambda x: x[0].start(), threadlist))
     return threadlist
 
 
