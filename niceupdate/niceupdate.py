@@ -700,7 +700,7 @@ def server_install(config, args, dblist):
         fn = partial(install, config['user'], SQL_DROP_PLPYTHONFUNC)
     else:
         return
-    map(fn, dblist)
+    list(map(fn, dblist))
 
 
 def read_database_configuration():
