@@ -746,7 +746,7 @@ def get_dblist(config):
     r = []
     shard = config.get('shard', None)
     logger.debug(dbconfig)
-    for k, v in dbconfig.iteritems():
+    for k, v in six.iteritems(dbconfig):
         if shard and k[-1] != str(shard):
             continue
         hostport, dbname = v.split('/')
