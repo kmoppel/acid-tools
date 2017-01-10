@@ -14,7 +14,6 @@ import select
 import six
 from six.moves import reduce
 import six.moves.queue as Queue
-import types
 import yaml
 import time
 import math
@@ -25,7 +24,8 @@ import re
 
 
 if six.PY2:
-    list_type = types.List
+    import types
+    list_type = types.ListType
 else:
     list_type = list
 
