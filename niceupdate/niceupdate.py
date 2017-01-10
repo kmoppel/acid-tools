@@ -12,6 +12,7 @@ import logging
 import termios
 import select
 import six
+from six.moves import reduce
 from six.moves.queue import Queue
 import types
 import yaml
