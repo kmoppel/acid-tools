@@ -11,7 +11,9 @@ import argparse
 import logging
 import termios
 import select
-import Queue
+import six
+from six.moves import reduce
+import six.moves.queue as Queue
 import yaml
 import time
 import math
@@ -19,6 +21,13 @@ import sys
 import tty
 import os
 import re
+
+
+if six.PY2:
+    import types
+    list_type = types.ListType
+else:
+    list_type = list
 
 CONFIG_FILE = os.path.expanduser('~/.niceupdate.conf')
 POISON = object()
@@ -286,9 +295,9 @@ class Query(object):
                 self.cur.execute(self.sql, args)
             else:
                 self.cur.execute(self.sql, kwargs)
-        except psycopg2.extensions.QueryCanceledError, p:
+        except psycopg2.extensions.QueryCanceledError as p:
             self.kindly.show_exception(p)
-        except BaseException, e:
+        except BaseException as e:
             self.kindly.cancel()
             self.kindly.show_exception(e)
             logger.debug(kwargs)
@@ -320,7 +329,7 @@ class Query(object):
                 if self.queue.empty():
                     self.queueIsEmpty.set()
                     self.queueIsEmpty.clear()
-        except BaseException, e:
+        except BaseException as e:
             self.kindly.cancel()
             self.kindly.show_exception(e)
         finally:
@@ -354,7 +363,7 @@ class Query(object):
                 if self.queue.empty():
                     self.queueIsEmpty.set()
                     self.queueIsEmpty.clear()
-        except BaseException, e:
+        except BaseException as e:
             logger.exception('Parameter: {}'.format(param))
             self.kindly.cancel()
             self.kindly.show_exception(e)
@@ -450,11 +459,11 @@ class KindlyUpdate(object):
             updater.join()
             if not (self.canceled or self.test):
                 self.report_result()
-        except PlaceholderParseException, e:
+        except PlaceholderParseException as e:
             self.cancel()
             self.last_exception = e
             logger.exception(e)
-        except Exception, e:
+        except Exception as e:
             logger.exception(e)
             self.last_exception = e
             self.cancel()
@@ -556,7 +565,7 @@ class KindlyUpdate(object):
                 logger.debug('xlog check failed')
                 self.show_message('result type of xlog check does not match')
                 return False
-        except StandardError, e:
+        except StandardError as e:
             self.show_message(str(e))
             logger.exception(e)
             return False
@@ -691,7 +700,8 @@ def server_install(config, args, dblist):
         fn = partial(install, config['user'], SQL_DROP_PLPYTHONFUNC)
     else:
         return
-    map(fn, dblist)
+    for db in dblist:
+        fn(db)
 
 
 def read_database_configuration():
@@ -705,21 +715,20 @@ def read_database_configuration():
         res = custom_database_config.load_database_config()
     except ImportError:
         logger.info('no custom implementation for database config found')
-    except BaseException, e:
+    except BaseException as e:
         logger.exception('error while loading config from custom_database_config')
 
-    import types
     import json
-    if type(res) == types.ListType and len(res) > 0:
+    if type(res) == list_type and len(res) > 0:
         return res
     # else: if this fails, we try user configuration
     try:
         with open(CONFIG_FILE, 'r') as f:
             res = json.load(f)
-    except BaseException, e:
+    except BaseException as e:
         logger.exception('Error reading ' + CONFIG_FILE)
         raise Exception(e)
-    if type(res) == types.ListType and len(res) > 0:
+    if type(res) == list_type and len(res) > 0:
         return res
     else:
         raise Exception('No database configuration found')
@@ -738,7 +747,7 @@ def get_dblist(config):
     r = []
     shard = config.get('shard', None)
     logger.debug(dbconfig)
-    for k, v in dbconfig.iteritems():
+    for k, v in six.iteritems(dbconfig):
         if shard and k[-1] != str(shard):
             continue
         hostport, dbname = v.split('/')
@@ -773,7 +782,8 @@ def start_threads(dbs, config):
         if not kindly.check_precondition():
             return []
         threadlist.append((worker, kindly))
-    map(lambda x: x[0].start(), threadlist)
+    for thread in threadlist:
+        thread[0].start()
     return threadlist
 
 
@@ -890,7 +900,7 @@ def main():
     config = load_config(args)
     try:
         dbs = get_dblist(config)
-    except BaseException, e:
+    except BaseException as e:
         sys.exit(str(e))
     if args.install or args.uninstall:
         server_install(config, args, dbs)
