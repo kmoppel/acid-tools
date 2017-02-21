@@ -403,8 +403,8 @@ def process_file(fp_in, read_from_position=0):
                 line = {key: value for (key, value) in line.items() if key in CSV_FIELDS_SHORT}
                 line['query'] = line['query'][:77] + '...' if len(line['query']) > 77 else line['query']
                 line['message'] = line['message'][:77] + '...' if len(line['message']) > 77 else line['message']
-
-            outfile_writer.writerow(line)
+            if outfile_writer:
+                outfile_writer.writerow(line)
 
     return fp_in.tell()
 
@@ -483,10 +483,11 @@ def main():
     if args.top_patterns:
         error_pattern_extractor = LogEntryPatternsExtractor()
 
-    if args.short:
-        outfile_writer = csv.DictWriter(sys.stdout, CSV_FIELDS_SHORT)
-    else:
-        outfile_writer = csv.DictWriter(sys.stdout, CSV_FIELDS)
+    if not (args.conns or args.top_patterns or args.stats or args.graph):
+        if args.short:
+            outfile_writer = csv.DictWriter(sys.stdout, CSV_FIELDS_SHORT)
+        else:
+            outfile_writer = csv.DictWriter(sys.stdout, CSV_FIELDS)
 
     if args.minutes:
         time_constraint = datetime.now() - timedelta(minutes=int(args.minutes))
