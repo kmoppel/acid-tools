@@ -12,7 +12,6 @@ import logging
 import termios
 import select
 import six
-from six.moves import reduce
 import six.moves.queue as Queue
 import yaml
 import time
@@ -29,7 +28,6 @@ if six.PY2:
 else:
     list_type = list
 
-CONFIG_FILE = os.path.expanduser('~/.niceupdate.conf')
 POISON = object()
 TIMEOUT = 0.2
 DELTA = datetime.timedelta(seconds=60)
@@ -90,9 +88,11 @@ def get_xlog_directory():
         plan = plpy.prepare("SELECT name, setting FROM pg_catalog.pg_settings  where name = 'data_directory'")
         SD['stmt_setting']= plan
     rv = plpy.execute(plan)
-# there should be an exception if this row is missing
     datadir = rv[0]['setting']
-    return os.path.join(datadir, 'pg_xlog')
+    if not 'pg_ver' in SD:
+        rv = plpy.execute("select current_setting('server_version_num')::numeric / 1e4 as ver")
+        SD['pg_ver']= rv[0]["ver"]
+    return os.path.join(datadir, 'pg_wal' if SD['pg_ver'] >= 10 else 'pg_xlog')
 
 def get_mount_point(realpathname):
     "Get the mount point of the filesystem containing pathname"
@@ -138,16 +138,14 @@ def getargs():
                                    ,
                                    epilog="""The config file can look like this at minimum:
 database: customer
-getid: select ad_id id from  zz_commons.appdomain
-update: update zz_commons.appdomain set ad_id = ad_id where ad_id = %(id)s
+getid: select myid as id from schema.table
+update: update schema.table set value = value + 1 where myid = %(id)s
 
 One of the following should be given and greater than 0:
 commitrows: 20
 chunksize: 0
 
 Following attribute are optional and would be overwritten if a command line arg is provided:
-environment: integration
-shard: 0
 maxload: 2.0
 vacuum_cycles: 10
 vacuum_delay: 100
@@ -156,18 +154,20 @@ vacuum_table: schema.table
 """
 )
     argp.add_argument('-f', '--file', dest='filename', required=True, help='yaml file for config data')
+    argp.add_argument('-H', '--host', dest='host', help='database host to connect to', required=True)
+    argp.add_argument('-p', '--port', dest='port', help='database port to connect to [5432]', default=5432, type=int)
+    argp.add_argument('-d', '--dbname', dest='dbname', help='database name to connect to', required=True)
+    argp.add_argument('-U', '--user', dest='user', help='user for database connect')
     argp.add_argument('-l', '--maxload', dest='maxload', type=float, metavar='FLOAT',
                       help='update unless load is higher than FLOAT')
     argp.add_argument('-C', '--commitrows', dest='commitrows', help='do commit every NUMBER of rows', metavar='NUMBER',
                       type=int)
     argp.add_argument('-t', '--test', dest='test', action='store_true', help='test parameter substitution and roll back'
                       , default=False)
-    argp.add_argument('-d', '--delay', dest='delay', help='delay between executing consecutive statements', type=int)
-    argp.add_argument('-E', '--environment', dest='environment', help='destination environment')
+    argp.add_argument('--delay', dest='delay', help='delay between executing consecutive statements', type=int)
     argp.add_argument('-F', '--force', dest='force',
                       help='Do not perform neither xlog nor load check in cases of absence of server extension on target database'
                       , action='store_true')
-    argp.add_argument('-S', '--shard', dest='shard', help='execute only on given shard')
     argp.add_argument('-v', '--verbose', dest='verbose', help='set log level DEBUG', action='store_true')
     argp.add_argument('-V', '--vacuumcycles', dest='vacuum_cycles', help='perform vacuum after NUMBER of commits',
                       metavar='NUMBER', type=int)
@@ -175,11 +175,10 @@ vacuum_table: schema.table
                       default=MINXLOGFREE)
     argp.add_argument('-Y', '--vacuumdelay', dest='vacuum_delay', help='vacuum_cost_delay (0...100) in ms', default=0,
                       type=int)
-    argp.add_argument('-U', '--user', dest='user', help='user for database connect')
     argp.add_argument('-u', '--uninstall', dest='uninstall', action='store_true',
-                      help='Uninstall server funtion from database specified in file')
+                      help='Uninstall helper server function from specified  database')
     argp.add_argument('-i', '--install', dest='install', action='store_true',
-                      help='Install server funtion on database specified in file')
+                      help='Install helper server function on specified database ')
     argp.add_argument('--disable-triggers', dest='disable_triggers', default=False, action='store_true',
                       help='disable triggers on all tables in the niceupdate database session')
     return argp.parse_args()
@@ -197,17 +196,12 @@ def load_config(args):
     logger.info('START: job file {} loaded.'.format(args.filename))
     document['test'] = args.test
     document['batchmode'] = not sys.stdout.isatty()
-    document['shard'] = args.shard or document.get('shard', None)
     document['verbose'] = args.verbose
     document['commitrows'] = args.commitrows or document.get('commitrows', 0)
     document['maxload'] = args.maxload or document.get('maxload') or 2.0
     document['vacuum_cycles'] = args.vacuum_cycles or document.get('vacuum_cycles') or 0
     document['vacuum_delay'] = args.vacuum_delay or document.get('vacuum_delay') or 0
-    document['environment'] = args.environment or document.get('environment', None)
     document['disable_triggers'] = args.disable_triggers or document.get('disable_triggers', False)
-    if not document['environment']:
-        sys.stderr.write('Database environment missing.\n')
-        sys.exit(1)
     if bool(document.get('commitrows')) == bool(document.get('chunksize')) or document.get('commitrows', 0) \
         + document.get('chunksize', 0) < 1:
         sys.stderr.write('Either commitrows or chunksize should be greater than 0.\n')
@@ -704,63 +698,6 @@ def server_install(config, args, dblist):
         fn(db)
 
 
-def read_database_configuration():
-    """First we try to load a python module implementing this reading of database list from somewhere.
-    If it fails we try to load from ~/.niceupdate.conf.
-    It returns a list of dicts."""
-
-    res = None
-    try:
-        import custom_database_config
-        res = custom_database_config.load_database_config()
-    except ImportError:
-        logger.info('no custom implementation for database config found')
-    except BaseException as e:
-        logger.exception('error while loading config from custom_database_config')
-
-    import json
-    if type(res) == list_type and len(res) > 0:
-        return res
-    # else: if this fails, we try user configuration
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            res = json.load(f)
-    except BaseException as e:
-        logger.exception('Error reading ' + CONFIG_FILE)
-        raise Exception(e)
-    if type(res) == list_type and len(res) > 0:
-        return res
-    else:
-        raise Exception('No database configuration found')
-
-
-def get_dblist(config):
-    '''Accept dictionary of configuration data.
-    Returns a list of tuples (shardname, host, port, databasename)'''
-
-    dblist = read_database_configuration()
-    environment = config.get('environment')
-    dbtype = config.get('database')
-    # for environment and database type we expect one dictionary of shards per configuration
-    dbconfig = reduce(lambda x, y: (y['shards'] if y['environment'] == environment and y['name'] == dbtype else x),
-                      dblist, {})
-    r = []
-    shard = config.get('shard', None)
-    logger.debug(dbconfig)
-    for k, v in six.iteritems(dbconfig):
-        if shard and k[-1] != str(shard):
-            continue
-        hostport, dbname = v.split('/')
-        host, port = get_host_port(hostport)
-        r.append((k, host, port, dbname))
-    if not r:
-        msg = "No database '{db}' found for environment '{env}' shard '{shard}'.".format(db=dbtype, env=environment,
-                shard=shard)
-        logger.warning(msg)
-        raise Exception(msg)
-    return r
-
-
 def makespace(count):
     space = count * '\n'
     sys.stdout.write(space)
@@ -824,12 +761,14 @@ def notify_input(input, threadlist, config):
 def setup_logger():
     global logger
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
+    # logger.setLevel(logging.INFO)
     fh = logging.FileHandler(filename='niceupdate.log')
     formatter = logging.Formatter('%(asctime)s - %(threadName)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
     logger.addHandler(fh)
-    logger.propagate = False
+    ch = logging.StreamHandler()
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
 
 
 def check_threads_and_statusupdate(threadlist, config):
@@ -862,7 +801,7 @@ def process_dbs(dbs, config):
         makespace(len(dbs))
     threadlist = start_threads(dbs, config)
     if not threadlist:
-        sys.exit('precondition not fulfilled')
+        sys.exit('precondition not fulfilled. if you wish to run without CPU load and WAL size checking (AWS RDS etc.) use the --force flag')
     if not batchmode:
         old_settings = termios.tcgetattr(sys.stdin)
     try:
@@ -898,12 +837,10 @@ def main():
     setup_logger()
     args = getargs()
     config = load_config(args)
-    try:
-        dbs = get_dblist(config)
-    except BaseException as e:
-        sys.exit(str(e))
+    dbs = [(None, args.host, args.port, args.dbname)]
     if args.install or args.uninstall:
         server_install(config, args, dbs)
+        logger.info('finished installing/uninstalling load helper. exit')
         sys.exit(0)
     result = process_dbs(dbs, config)
     sys.exit(result)
