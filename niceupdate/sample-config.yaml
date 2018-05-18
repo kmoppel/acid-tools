@@ -1,0 +1,12 @@
+database: pgbench_accounts
+getid: select aid id from pgbench_accounts where abalance = 0
+update: update pgbench_accounts set abalance = 1 where aid = %(id)s
+
+commitrows: 20
+chunksize: 0
+
+maxload: 2.0
+vacuum_cycles: 10
+vacuum_delay: 100
+delay: 1
+vacuum_table: pgbench_accounts
