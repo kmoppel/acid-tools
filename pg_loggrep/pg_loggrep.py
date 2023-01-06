@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import sys
@@ -89,13 +89,11 @@ class LogEntryPatternsExtractor(object):
         if in_str is None or in_str.strip() == '':
             return ''
         for sub_regex, sub_char in LogEntryPatternsExtractor.SUBSTITUTIONS:
-            # print t
             in_str = sub_regex.sub(sub_char, in_str)
         return in_str
 
     @staticmethod
     def get_signature_for_single_log_entry(e):
-        # print e['message'], e['detail'], e['query']
         return LogEntryPatternsExtractor.apply_substitutions(e['message'])
 
     def add_log_enty_for_signaturing(self, log_entry):
@@ -108,7 +106,7 @@ class LogEntryPatternsExtractor(object):
 def get_files_for_days(days, base_glob):
     files = []
     now = datetime.now()
-    for i in xrange(days - 1, -1, -1):
+    for i in range(days - 1, -1, -1):
         d = now - timedelta(i)
         p = (base_glob + PG_LOG_NAMING).format(curdate=d.strftime('%Y-%m-%d'))
         logging.info('Finding logs from glob: %s', p)
@@ -217,33 +215,32 @@ def to_datetime(dt_string):
 
 def print_stats(stats, order_by='ERROR'):
     """ stats={'dbname': {level: count, ...}} """
-    for db, s in stats.iteritems():
+    for db, s in stats.items():
         for level in ['FATAL', 'ERROR', 'WARNING', 'LOG']:
             if level not in s:
                 s[level] = 0
     stats = sorted(stats.items(), key=lambda x: x[1][order_by], reverse=True)
     for db, s in stats:
-        print '{0:30}: FATAL {1:7}\tERROR {2:7}\tWARNING {3:7}\tLOG {4:7}'.format('"{}"'.format(db),
+        print('{0:30}: FATAL {1:7}\tERROR {2:7}\tWARNING {3:7}\tLOG {4:7}'.format('"{}"'.format(db),
                                                                            s['FATAL'],
                                                                            s['ERROR'],
                                                                            s['WARNING'],
-                                                                           s['LOG'])
-
+                                                                           s['LOG']))
 
 def print_conns(conns):
     """ conns={'dbname': {user: count, ...}} """
     total = 0
 
     for db in sorted(conns):
-        print '\n---', db, '---'
+        print('\n---', db, '---')
 
         for u, c in sorted(conns[db].items(), key=lambda x: x[1], reverse=True):
-            print '{0:30}\t{1:6}'.format(u, c)
+            print('{0:30}\t{1:6}'.format(u, c))
             total += c
 
-    print '\n--- SUMMARY for timerange {} to {} ---'.format(min_time.strftime('%Y-%m-%d %H:%M'), max_time.strftime('%Y-%m-%d %H:%M'))
-    print '{0:30}\t{1:6}'.format('total', total)
-    print '{0:30}\t{1:6}'.format('conns/min', round(total / (max_time - min_time).total_seconds() * 60, 1))
+    print('\n--- SUMMARY for timerange {} to {} ---'.format(min_time.strftime('%Y-%m-%d %H:%M'), max_time.strftime('%Y-%m-%d %H:%M')))
+    print('{0:30}\t{1:6}'.format('total', total))
+    print('{0:30}\t{1:6}'.format('conns/min', round(total / (max_time - min_time).total_seconds() * 60, 1)))
 
 
 def print_graph(buckets):
@@ -267,28 +264,28 @@ def print_graph(buckets):
     if max(counts) > max_width:
         step = max(counts) / max_width
 
-    print '--- first bucket start time {} ---'.format(buckets[0].strftime('%Y-%m-%d %H:00'))
+    print('--- first bucket start time {} ---'.format(buckets[0].strftime('%Y-%m-%d %H:00')))
     for i, count in enumerate(counts):
         ticks = int(count / step)
         if ticks == 0 and count > 0:
-            print '{0:3}h: '.format(-(bucket_count-i)) + tick_char_min + '  ' + str(count)
+            print('{0:3}h: '.format(-(bucket_count-i)) + tick_char_min + '  ' + str(count))
         else:
-            print '{0:3}h: '.format(-(bucket_count-i)) + ticks*tick_char + '  ' + str(count)
+            print('{0:3}h: '.format(-(bucket_count-i)) + ticks*tick_char + '  ' + str(count))
 
-    print '--- last bucket start time {} ---'.format(buckets[-1].strftime('%Y-%m-%d %H:00'))
+    print('--- last bucket start time {} ---'.format(buckets[-1].strftime('%Y-%m-%d %H:00')))
 
 
 def print_top_patterns(limit=10):
-    print '\n--- TOP PATTERNS SUMMARY for timerange {} to {} ---'.format(min_time.strftime('%Y-%m-%d %H:%M'), max_time.strftime('%Y-%m-%d %H:%M'))
-    print '-'*60
-    print '{:<10}{:<10}{:<30}{}'.format('Count', 'Severity', 'Dbname', 'Pattern')
-    print '-'*60
+    print('\n--- TOP PATTERNS SUMMARY for timerange {} to {} ---'.format(min_time.strftime('%Y-%m-%d %H:%M'), max_time.strftime('%Y-%m-%d %H:%M')))
+    print('-'*60)
+    print('{:<10}{:<10}{:<30}{}'.format('Count', 'Severity', 'Dbname', 'Pattern'))
+    print('-'*60)
     top_patterns = error_pattern_extractor.counter.most_common(limit)
     for db_severity_pattern, count in top_patterns:
         db, severity, pattern = db_severity_pattern
-        print '{:<10}{:<10}{:<30}{}'.format(count, severity, db, pattern if len(pattern) <= 80 else pattern[0:78] + '..')
-    print '-'*60
-    print '{0:<10}Total'.format(sum(error_pattern_extractor.counter.values()))
+        print('{:<10}{:<10}{:<30}{}'.format(count, severity, db, pattern if len(pattern) <= 80 else pattern[0:78] + '..'))
+    print('-'*60)
+    print('{0:<10}Total'.format(sum(error_pattern_extractor.counter.values())))
 
 
 def fill_bucket_holes(min_time, buckets):
@@ -299,7 +296,7 @@ def fill_bucket_holes(min_time, buckets):
     while tmp <= last_bucket:
         ret[tmp] = 0
         tmp += timedelta(hours=1)
-    for k, v in buckets.iteritems():
+    for k, v in buckets.items():
         ret[k] = v
     return ret
 
@@ -334,7 +331,7 @@ def process_file(fp_in, read_from_position=0):
             # logger.info('is_robot: %s', is_robot)
             # logger.info('is_pgadmin3_noise: %s', is_pgadmin3_noise(line))
             if args.verbose:
-                print line
+                print(line)
 
             log_time = to_datetime(line['log_time'])
             if args.minutes:
@@ -535,11 +532,11 @@ def main():
                             current_file_pos = process_file(current_file_fp)
                     time.sleep(1)
 
-    except IOError, KeyboardInterrupt:
+    except (IOError, KeyboardInterrupt):
         pass
 
     if not min_time:
-        print '\n--- no data ---'
+        print('\n--- no data ---')
         exit(0)
 
     # display aggregations if any
