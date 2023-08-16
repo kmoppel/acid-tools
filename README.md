@@ -13,7 +13,7 @@ Rules for "idle time", host, database and username exclusion/inclusion are confi
 
 A script for performing bigger data updates in a safe, controlled and observable (progress indication) manner by chunking
 the workload and by reading load/xlog feedback from the DB host. Databases, update commands and chunk sizes are configurable via a yaml file (see --help).
-More information on tool's [Wiki page] (https://github.com/zalando/acid-tools/wiki/Niceupdate).
+More information on tool's [Wiki page] (https://github.com/kmoppel/acid-tools/wiki/Niceupdate).
 
 ## pg_loggrep
 
